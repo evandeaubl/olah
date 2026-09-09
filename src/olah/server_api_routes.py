@@ -17,6 +17,7 @@ from olah.errors import error_repo_not_found
 from olah.proxy.commits import commits_generator
 from olah.proxy.meta import meta_generator
 from olah.proxy.pathsinfo import pathsinfo_generator
+from olah.proxy.refs import refs_generator
 from olah.proxy.tree import tree_generator
 from olah.server_access import build_repo_ref, ensure_repo_visibility, parse_repo_ref
 from olah.server_mirror import load_local_mirror_payload
@@ -331,6 +332,44 @@ async def _xet_read_token_passthrough(repo_type: str, org_repo: str, commit: str
     )
 
 
+async def refs_proxy_common(
+    app: FastAPI,
+    repo_type: Literal["models", "datasets", "spaces"],
+    org: str,
+    repo: str,
+    method: str,
+    authorization: Optional[str],
+) -> Response:
+    repo_ref = build_repo_ref(repo_type, org, repo)
+    access_error = await ensure_repo_visibility(app, repo_ref, authorization)
+    if access_error is not None:
+        return access_error
+
+    refs_data = load_local_mirror_payload(
+        app,
+        repo_ref,
+        lambda local_repo: local_repo.get_refs(),
+        _get_logger(app),
+    )
+    if refs_data is not None:
+        return JSONResponse(content=refs_data)
+
+    try:
+        generator = await refs_generator(
+            app=app,
+            repo_type=repo_type,
+            org=org,
+            repo=repo,
+            override_cache=False,
+            method=method,
+            authorization=authorization,
+        )
+        return await build_streaming_response(generator)
+    except httpx.ConnectTimeout:
+        traceback.print_exc()
+        return Response(status_code=504)
+
+
 @router.head("/api/{repo_type}/{org}/{repo}/xet-read-token/{commit}")
 @router.get("/api/{repo_type}/{org}/{repo}/xet-read-token/{commit}")
 async def xet_read_token_expanded(repo_type: str, org: str, repo: str, commit: str, request: Request):
@@ -411,6 +450,51 @@ async def meta_proxy_commit_compact(
         org=repo_ref.org,
         repo=repo_ref.repo,
         commit=commit,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
+    )
+
+
+@router.head("/api/{repo_type}/{org}/{repo}/tree/{commit}")
+@router.get("/api/{repo_type}/{org}/{repo}/tree/{commit}")
+async def tree_proxy_commit_root_expanded(
+    repo_type: str, org: str, repo: str, commit: str, request: Request,
+    recursive: bool = False,
+    expand: bool = False,
+):
+    return await tree_proxy_common(
+        request.app,
+        repo_type=repo_type,
+        org=org,
+        repo=repo,
+        commit=commit,
+        path="",
+        recursive=recursive,
+        expand=expand,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
+    )
+
+
+@router.head("/api/{repo_type}/{org_repo}/tree/{commit}")
+@router.get("/api/{repo_type}/{org_repo}/tree/{commit}")
+async def tree_proxy_commit_root_compact(
+    repo_type: str, org_repo: str, commit: str, request: Request,
+    recursive: bool = False,
+    expand: bool = False,
+):
+    repo_ref = parse_repo_ref(repo_type, org_repo)
+    if repo_ref is None:
+        return error_repo_not_found()
+    return await tree_proxy_common(
+        request.app,
+        repo_type=repo_type,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
+        commit=commit,
+        path="",
+        recursive=recursive,
+        expand=expand,
         method=request.method.lower(),
         authorization=request.headers.get("authorization", None),
     )
@@ -546,6 +630,35 @@ async def commits_proxy_commit_compact(
         org=repo_ref.org,
         repo=repo_ref.repo,
         commit=commit,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
+    )
+
+
+@router.head("/api/{repo_type}/{org}/{repo}/refs")
+@router.get("/api/{repo_type}/{org}/{repo}/refs")
+async def refs_proxy_expanded(repo_type: str, org: str, repo: str, request: Request):
+    return await refs_proxy_common(
+        request.app,
+        repo_type=repo_type,
+        org=org,
+        repo=repo,
+        method=request.method.lower(),
+        authorization=request.headers.get("authorization", None),
+    )
+
+
+@router.head("/api/{repo_type}/{org_repo}/refs")
+@router.get("/api/{repo_type}/{org_repo}/refs")
+async def refs_proxy_compact(repo_type: str, org_repo: str, request: Request):
+    repo_ref = parse_repo_ref(repo_type, org_repo)
+    if repo_ref is None:
+        return error_repo_not_found()
+    return await refs_proxy_common(
+        request.app,
+        repo_type=repo_type,
+        org=repo_ref.org,
+        repo=repo_ref.repo,
         method=request.method.lower(),
         authorization=request.headers.get("authorization", None),
     )

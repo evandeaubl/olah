@@ -238,7 +238,12 @@ class LocalMirrorRepo(object):
         except gitdb.exc.BadName:
             return None
 
-        index_obj = self.get_index_object_by_path(commit_hash=commit_hash, path=path)
+        if path and path.strip("/"):
+            index_obj = self.get_index_object_by_path(commit_hash=commit_hash, path=path)
+        else:
+            index_obj = commit.tree
+        if index_obj is None:
+            return None
         items = self._get_tree_files(tree=index_obj, recursive=recursive, expand=expand)
         for r in items:
             r.pop("name")
@@ -299,6 +304,23 @@ class LocalMirrorRepo(object):
             self._get_earliest_commit().committed_datetime
         )
         return meta.to_dict()
+
+    def get_refs(self) -> Dict[str, Any]:
+        branches = []
+        for head in self._git_repo.heads:
+            branches.append({
+                "name": head.name,
+                "ref": f"refs/heads/{head.name}",
+                "targetCommit": head.commit.hexsha,
+            })
+        tags = []
+        for tag in self._git_repo.tags:
+            tags.append({
+                "name": tag.name,
+                "ref": f"refs/tags/{tag.name}",
+                "targetCommit": tag.commit.hexsha,
+            })
+        return {"branches": branches, "tags": tags}
 
     def _contain_path(self, path: str, tree: Tree) -> bool:
         norm_p = os.path.normpath(path).replace("\\", "/")

@@ -6,9 +6,9 @@
 # https://opensource.org/licenses/MIT.
 
 import os
-from typing import AsyncIterator, Dict, Literal, Mapping, Optional
+from typing import AsyncIterator, Dict, Literal, Optional
 from urllib.parse import urljoin
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 
 import httpx
 from olah.constants import CHUNK_SIZE, WORKER_API_TIMEOUT
@@ -20,7 +20,7 @@ from olah.utils.file_utils import make_dirs
 from olah.proxy.result import ProxyResult, single_chunk_body
 
 
-async def _tree_cache_generator(save_path: str) -> ProxyResult:
+async def _refs_cache_generator(save_path: str) -> ProxyResult:
     cache_rq = await read_cache_request(save_path)
     return ProxyResult(
         status_code=cache_rq["status_code"],
@@ -28,12 +28,11 @@ async def _tree_cache_generator(save_path: str) -> ProxyResult:
         body=single_chunk_body(cache_rq["content"]),
     )
 
-async def _tree_proxy_generator(
-    app: FastAPI,
+
+async def _refs_proxy_generator(
     headers: Dict[str, str],
-    tree_url: str,
+    refs_url: str,
     method: str,
-    params: Mapping[str, str],
     allow_cache: bool,
     save_path: str,
 ) -> ProxyResult:
@@ -46,8 +45,7 @@ async def _tree_proxy_generator(
         async with httpx.AsyncClient(follow_redirects=True) as client:
             async with client.stream(
                 method=method,
-                url=tree_url,
-                params=params,
+                url=refs_url,
                 headers=headers,
                 timeout=WORKER_API_TIMEOUT,
             ) as response:
@@ -72,8 +70,7 @@ async def _tree_proxy_generator(
     async with httpx.AsyncClient(follow_redirects=True) as client:
         async with client.stream(
             method=method,
-            url=tree_url,
-            params=params,
+            url=refs_url,
             headers=headers,
             timeout=WORKER_API_TIMEOUT,
         ) as response:
@@ -86,15 +83,11 @@ async def _tree_proxy_generator(
     )
 
 
-async def tree_generator(
+async def refs_generator(
     app: FastAPI,
     repo_type: Literal["models", "datasets", "spaces"],
     org: str,
     repo: str,
-    commit: str,
-    path: str,
-    recursive: bool,
-    expand: bool,
     override_cache: bool,
     method: str,
     authorization: Optional[str],
@@ -106,22 +99,19 @@ async def tree_generator(
     org_repo = get_org_repo(org, repo)
     # save
     repos_path = app.state.app_settings.config.repos_path
-    save_dir = os.path.join(
-        repos_path, f"api/{repo_type}/{org_repo}/tree/{commit}/{path}"
-    )
-    save_path = os.path.join(save_dir, f"tree_{method}_recursive_{recursive}_expand_{expand}.json")
+    save_dir = os.path.join(repos_path, f"api/{repo_type}/{org_repo}/refs")
+    save_path = os.path.join(save_dir, f"refs_{method}.json")
 
     use_cache = os.path.exists(save_path)
     allow_cache = await check_cache_rules_hf(app, repo_type, org, repo)
 
-    org_repo = get_org_repo(org, repo)
-    tree_url = urljoin(
+    refs_url = urljoin(
         app.state.app_settings.config.hf_url_base(),
-        f"/api/{repo_type}/{org_repo}/tree/{commit}" + (f"/{path}" if path else ""),
+        f"/api/{repo_type}/{org_repo}/refs",
     )
     # proxy
     if use_cache and not override_cache:
-        return await _tree_cache_generator(save_path)
-    return await _tree_proxy_generator(
-        app, headers, tree_url, method, {"recursive": recursive, "expand": expand}, allow_cache, save_path
+        return await _refs_cache_generator(save_path)
+    return await _refs_proxy_generator(
+        headers, refs_url, method, allow_cache, save_path
     )
