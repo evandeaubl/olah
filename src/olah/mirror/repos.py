@@ -388,7 +388,7 @@ class LocalMirrorRepo(object):
         def stream_wrapper(file_bytes: bytes):
             file_stream = io.BytesIO(file_bytes)
             while True:
-                chunk = file_stream.read(4096)
+                chunk = file_stream.read(4 * 1024 * 1024)
                 if len(chunk) == 0:
                     break
                 else:
