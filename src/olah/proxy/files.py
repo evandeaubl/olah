@@ -753,7 +753,11 @@ async def _try_redirect_to_content_route(
             "accept-ranges": "bytes",
         }
         if size is not None:
-            response_headers["content-length"] = str(size)
+            # content-length must describe THIS response's body (empty for a
+            # 302), never the redirect target's size: declaring the file size
+            # makes uvicorn/h11 abort the send with "Too little data for
+            # declared Content-Length" (HEAD was immune because h11 forces
+            # empty framing for HEAD). x-linked-size carries the target's size.
             response_headers["x-linked-size"] = str(size)
         if oid:
             response_headers["x-linked-etag"] = f'"{oid}"'
@@ -848,7 +852,12 @@ def _xet_passthrough_result(
     # KeyError on a 3xx response without a Location header. Upstream's Location
     # is an absolute CAS bridge URL — the client won't follow it (only relative
     # redirects are followed) but the header must still be present.
-    for h in ("etag", "content-length", "content-type", "location"):
+    # content-length is deliberately NOT forwarded: it describes the upstream
+    # GET's would-be body (HEAD responses usually carry a non-zero one), while
+    # this 3xx body is empty — grafting it aborts the send in uvicorn/h11 with
+    # "Too little data for declared Content-Length". x-linked-size conveys the
+    # target file's size instead.
+    for h in ("etag", "content-type", "location"):
         if h in response.headers:
             response_headers[h] = response.headers[h]
     if commit is not None:

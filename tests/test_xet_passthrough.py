@@ -334,7 +334,10 @@ def _xet_response(size=str(100 * 1024**3)):
             "etag": '"caa3..."',
             "link": '<https://huggingface.co/api/models/x/y/xet-read-token/abc>; rel="xet-auth"',
             "x-repo-commit": "abc123",
-            "location": "https://cas-bridge.xethub.hf.co/xet-bridge-us/abc?signed=1",
+            "location": "https://us.aws.cdn.hf.co/xet-bridge-us/ab12cd34/md5abc0f6d?X-Amz-Signed=1",
+            # Real upstream HEADs carry this (describing the would-be GET body);
+            # mirroring it onto olah's empty-bodied 3xx would abort the send.
+            "content-length": "12345",
         },
     )
 
@@ -364,10 +367,12 @@ def test_passthrough_result_mirrors_upstream_xet_headers():
     assert headers["accept-ranges"] == "bytes"
     # Location must be forwarded so huggingface_hub's relative-redirect follower
     # doesn't KeyError on the 3xx response.
-    assert headers["location"].startswith("https://cas-bridge.xethub.hf.co/")
-    # We must NOT synthesize content-length from x-linked-size: the response
-    # body is empty and x-linked-size is the *target file* size, not the body.
-    # Lying about it would mislead any client that follows the 302.
+    assert headers["location"].startswith("https://us.aws.cdn.hf.co/xet-bridge-us/")
+    # We must NOT synthesize/forward content-length: the response body is empty
+    # and x-linked-size is the *target file* size, not the body. Grafting the
+    # upstream HEAD's content-length (or the target size) onto this empty-bodied
+    # 302 makes uvicorn/h11 abort with "Too little data for declared
+    # Content-Length".
     assert "content-length" not in headers
 
 
@@ -395,6 +400,48 @@ def test_passthrough_result_gates_on_min_size():
     assert proxy_files._xet_passthrough_result(_xet_response(), None, 200 * 1024**3) is None
     # Exactly at the threshold passes through (>= semantics).
     assert proxy_files._xet_passthrough_result(_xet_response(), None, 100 * 1024**3) is not None
+
+
+# ---------------------------------------------------------------------------
+# Redirect model (_try_redirect_to_content_route)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_redirect_model_302_has_no_content_length(tmp_path):
+    # Regression: the redirect-model 302 must not carry a content-length
+    # describing the TARGET FILE's size. Its body is empty; starlette streams
+    # caller-supplied headers verbatim, so uvicorn/h11 aborts the send with
+    # "Too little data for declared Content-Length" (observed as an
+    # h11.LocalProtocolError GETting a large gguf resolve URL). x-linked-size
+    # is the correct vehicle for the target's size.
+    app = _fake_app_xet(tmp_path, xet_passthrough=False, redirect_model=True)
+    result = await proxy_files._try_redirect_to_content_route(
+        app,
+        _xet_response(),
+        repo_type="models",
+        org="unsloth",
+        repo="gguf-repo",
+        file_path="model.gguf",
+        commit="abc123",
+    )
+
+    assert result is not None
+    assert result.status_code == 302
+    # Relative location pointing at olah's own Xet content route.
+    assert result.headers["location"].startswith("/xet-bridge-us/")
+    # Target metadata is preserved in headers that don't frame the body.
+    assert result.headers["x-linked-size"] == str(100 * 1024**3)
+    assert result.headers["x-linked-etag"] == '"caa3..."'
+    assert result.headers["x-repo-commit"] == "abc123"
+    assert result.headers["etag"] == '"bdcc...0f6d"'
+    # Native Xet must stay disabled: hf_hub must follow the redirect over HTTP
+    # instead of engaging hf_xet.
+    assert "x-xet-hash" not in result.headers
+    # The actual regression: no content-length at all.
+    assert "content-length" not in result.headers
+    # And the body really is empty (what makes a lying content-length fatal).
+    assert [chunk async for chunk in result.body] == [b""]
 
 
 def test_passthrough_result_size_unknown_still_passes_through():
